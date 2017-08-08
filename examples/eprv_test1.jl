@@ -1,5 +1,5 @@
 ENV["PLOTS_DEFAULT_BACKEND"] = "Plotly"
-data = readdlm("../data/eprv3_rvs_1.txt");
+data = readdlm("../data/rvs_0001.txt");
 
 want_to_plot_pgram = false
 if want_to_plot_pgram
@@ -8,18 +8,21 @@ if want_to_plot_pgram
   plot(periodpower(pgram),xscale=:log)
 end 
 
-include("find_peaks.jl")
+include("../src/find_peaks.jl")
 num_planets = 2
+#=
 periods_to_try = find_n_peaks(data[:,1],data[:,2],data[:,3],num_peaks=num_planets)
 
-try_period_near_rotation = false
+try_extra_period_near_rotation = false
 if try_extra_period_near_rotation 
   rotation_period = 20.0
   push!(periods_to_try,rotation_period)
   num_planets += 1 
 end
+=#
 
-include("rv_model.jl")    # provides logtarget
+num_planets = 0
+include("../src/rv_model.jl")    # provides logtarget
 import RvModelCircularIndepNoise
 RvModelCircularIndepNoise.set_times(data[:,1]);
 RvModelCircularIndepNoise.set_obs(data[:,2]);
@@ -34,6 +37,12 @@ RvModelCircularIndepNoise.set_rvoffset(param_init_circ_indep,0.)
 RvModelCircularIndepNoise.set_jitter(param_init_circ_indep, 1.0)
 
 RvModelCircularIndepNoise.logtarget(param_init_circ_indep)
+
+if !isdefined(:QuadGK) using QuadGK end
+f(x) = RvModelCircularIndepNoise.logtarget([x])
+QuadGK.quadgk(f,0.0,99.0)
+
+
 
 if !isdefined(:Optim) using Optim end
 
@@ -68,6 +77,10 @@ num_offsets = 1
 param_init_circ_gp = vcat(param_init_circ_indep[1:num_planets*RvModelCircularIndepNoise.num_param_per_planet+num_offsets],zeros(RvModelCircularGPNoise.num_noise_param()) ) 
 RvModelCircularGPNoise.set_noise_param(param_init_circ_gp, [3.0, 50., 0.5, 20.])
 RvModelCircularGPNoise.logtarget(param_init_circ_gp)
+
+if !isdefined(:QuadGK) using QuadGK end
+f(x) = RvModelCircularGPNoise.logtarget([x])
+QuadGK.quadgk(f,0.0,99.0)
 
 # Refitting with a GP model isn't really necessary, but I wrote it to make sure things were working
 function negative_logtarget_fixed_PK(p::Float64)
@@ -104,7 +117,7 @@ if plot_residuals_periodogram
   plot(periodpower(resid_pgram),xscale=:log)
 end
 
-include("demcmc.jl")
+include("../src/demcmc.jl")
 
 perturb_scale = fill(0.01,length(param_init_circ_gp))
 for p in 1:num_planets 
@@ -146,6 +159,9 @@ RvModelKeplerianGPNoise.set_rvoffset(param_init_kepler_gp, RvModelCircularGPNois
 RvModelKeplerianGPNoise.set_noise_param(param_init_kepler_gp, [3.0, 50., 0.5, 20.])
 RvModelKeplerianGPNoise.logtarget(param_init_kepler_gp)
 
+if !isdefined(:QuadGK) using QuadGK end
+f(x) = RvModelKeplerianGPNoise.logtarget([x])
+QuadGK.quadgk(f,0.0,99.0)
 
 perturb_scale = fill(0.01,length(param_init_kepler_gp))
 for p in 1:num_planets 

@@ -19,27 +19,57 @@ function is_valid(p::Vector)
    is_valid_noise(p) && is_valid_planets(p)
 end
 
+function logprior_period(P::Real)
+  const min_period = 1.0
+  const max_period = 10000.0
+  const norm = -log(max_period/min_period)
+  if !(min_period<=P<=max_period)
+     return -Inf
+  end
+  return norm-log(P)
+end
+
+function logprior_amplitude(K::Real)
+  const min_K = 0.0
+  const max_K = 999.0
+  const K0 = 1.0
+  const norm = -log(K0*log1p(maxK/min_K))
+  if !(min_K<=K<=max_K)
+     return -Inf
+  end
+  return norm-log1p(K/K0)
+end
+
 function logprior_planets(p::Vector) 
   if !is_valid_planets(p) return -Inf end  # prempt model evaluation
   num_pl = num_planets(p)
-  @assert num_pl >= 1
   logp = zero(eltype(p))
-  if num_param_per_planet == 5
+  if num_pl <= 0 return logp end
+  if num_param_per_planet == 3
+     logp -= num_pl*log(2pi)
+  elseif num_param_per_planet == 5
      logp -= 2*num_pl*log(2pi)
   end
-  const max_period = 10000.0
-  const max_amplitude = 10000.0
   for plid in 1:num_pl
     P::eltype(p) = extract_period(p,plid=plid)
     K::eltype(p) = extract_amplitude(p,plid=plid)
-    logp += -log((1+P/P0::Float64)*log1p(max_period/P0::Float64)* 
-                 (1+K/K0::Float64)*log1p(max_amplitude/K0::Float64) )
+    logp += logprior_period(P) + logprior_amplitude(K)
   end
   return logp::eltype(p)
 end
 
+function logprior_offset(C::Real)
+  const max_C = 1000.0
+  if !(-max_C<=C<=max_C) 
+     return -Inf
+  end
+  return -log(2*max_C)
+end
+
+logprior_offset(p::Vector) = logprior_offset(extract_rvoffset(p))
+
 function logprior(p::Vector) 
-  logprior_noise(p) + logprior_planets(p) 
+  logprior_noise(p) + logprior_offset(p) + logprior_planets(p) 
 end
 
 function logtarget(p::Vector)

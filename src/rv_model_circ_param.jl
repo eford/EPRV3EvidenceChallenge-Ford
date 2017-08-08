@@ -12,9 +12,9 @@ noise_param_offset(theta::Vector) = length(theta)-(num_noise_param()-1)
 const P0 = 1.0  # units of days
 const K0 = 1.0  # units of m/s
 
-transform_period(P) = log1p(P/P0)
+transform_period(P) = log(P/P0)
 transform_amplitude(K) = log1p(K/K0)
-inv_transform_period(x) = P0*(exp(x)-1)
+inv_transform_period(x) = P0*exp(x)
 inv_transform_amplitude(x) = K0*(exp(x)-1)
 
 set_period(theta::Vector, P; plid::Integer = 1) = theta[1+pl_offset(plid)] = transform_period(P)

@@ -39,7 +39,6 @@ end
 
 function loglikelihood(p::Vector)
   num_pl = num_planets(p)
-  @assert num_pl >= 1
   if !is_valid(p) return -Inf end  # prempt model evaluation
   # Set t, o, and so to point to global arrays with observational data, while enforcing types
   t::Array{Float64,1} = times
