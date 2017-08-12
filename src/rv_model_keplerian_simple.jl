@@ -1,18 +1,19 @@
-using DiffBase
-using ForwardDiff
-using PDMats
-using Optim
+if !isdefined(:PDMats)      using PDMats      end # Positive Definite Matrices
+if !isdefined(:Optim)       using Optim       end # Optimizing over non-linear parameters
+if !isdefined(:DiffBase)    using DiffBase    end # For accessing results of autodiff
+if !isdefined(:ForwardDiff) using ForwardDiff end # For computing derivatives analytically
 
 const default_tol_kepler_eqn = 1.e-8
 
-function calc_rv_pal_one_planet{T,A<:AbstractArray{T,1}}( theta::A, time::Float64; tol::Real = default_tol_kepler_eqn  )
+function calc_rv_pal_one_planet{T,A<:AbstractArray{T,1}}( theta::A, time::Float64; tol::Real = default_tol_kepler_eqn, tref::Real = 300.0  )
   P = theta[1]
   K = theta[2]
   h = theta[3]
   k = theta[4]
-  M0 = theta[5]
+  wpM0 = theta[5]
   ecc = sqrt(h*h+k*k)
-  w = atan2(k,h)
+  w = atan2(h,k)
+  M0 = wpM0-w-2pi*tref/P
   n = 2pi/P
   M = time*n-M0
   #M = mod2pi(M)
@@ -100,11 +101,11 @@ ForwardDiff.gradient(f,param)
 ForwardDiff.jacobian(f,param)
 =#
 
-function loglikelihood_fixed_jitter{T,PDMatT<:AbstractPDMat}(theta::Array{T,1}, times::Array{Float64}, vels::Array{Float64}, Sigma::PDMatT)
+function calc_model_rv_deltas{T}(theta::Array{T,1}, times::Array{Float64}, vels::Array{Float64})
   const nparam_per_pl = 5
   const nparam_non_pl = 1
   num_pl = convert(Int64,floor((length(theta)-nparam_non_pl)//nparam_per_pl))
-  logp = 0
+  logp = zero(T)
   for p in 1:num_pl
      P = theta[1+(p-1)*nparam_per_pl]
 	 if P<0.0
@@ -121,12 +122,27 @@ function loglikelihood_fixed_jitter{T,PDMatT<:AbstractPDMat}(theta::Array{T,1}, 
 	   logp -= 1000*length(times)*(ecc-1)^2
 	 end
   end
-  delta = calc_model_rv(view(theta,1:(length(theta)-1)),times).-vels
+  delta = calc_model_rv(view(theta,1:num_pl*nparam_per_pl+1),times).-vels
+  (delta,logp)
+end
+function loglikelihood_fixed_jitter_from_delta_Sigma{T,PDMatT<:AbstractPDMat}(delta::Array{T,1}, Sigma::PDMatT)
   chisq = dot(delta, Sigma \ delta)
-  logp -= 0.5*(chisq + logdet(Sigma) +length(times)*log(2pi) )
-  return logp
+  -0.5*(chisq + logdet(Sigma) +length(delta)*log(2pi) )
+end
+function loglikelihood_fixed_jitter{T,PDMatT<:AbstractPDMat}(theta::Array{T,1}, times::Array{Float64}, vels::Array{Float64}, Sigma::PDMatT)
+   (delta,logp) = calc_model_rv_deltas(theta,times,vels)
+   logp += loglikelihood_fixed_jitter_from_delta_Sigma(delta,Sigma)
 end
 
+function loglikelihood_marinalize_jitter{T}(theta::Array{T,1}, times::Array{Float64}, vels::Array{Float64}; sigma_obs::Array{Float64}=ones(length(vels)), num_Sigmas::Integer=20, Sigma_cache=make_Sigma_cache(num_Sigmas,PDMat(make_Sigma(times,sigma_obs,0.))) )
+	(sigmaj_list, weights, SigmaList) = Sigma_cache
+	(delta,logp) = calc_model_rv_deltas(theta,times,vels)
+	marginalized_likelihood_fix_periods_sigmaj = map(k-> loglikelihood_fixed_jitter_from_delta_Sigma(delta,SigmaList[k]),1:length(sigmaj_list))
+    int_norm = maximum(marginalized_likelihood_fix_periods_sigmaj);
+    logp += log(dot( weights, exp.(marginalized_likelihood_fix_periods_sigmaj-int_norm) ))+int_norm
+end
+
+#=
 function loglikelihood_add_whitenoise{T,PDMatT<:AbstractPDMat}(theta::Array{T,1}, times::Array{Float64}, vels::Array{Float64}, Sigma::PDMatT)
   const nparam_per_pl = 5
   const nparam_non_pl = 2
@@ -153,28 +169,225 @@ function loglikelihood_add_whitenoise{T,PDMatT<:AbstractPDMat}(theta::Array{T,1}
   SigmaNew = Sigma + PDiagMat(sigmaj^2*ones(length(times)))
   chisq = dot(delta, SigmaNew \ delta)
   logp -= 0.5*(chisq + logdet(SigmaNew) + length(times)*log(2pi) )
+  logp += logprior_kepler(theta)
+  return logp
+end
+=#
+
+#=
+# Set priors
+const Cmax = 1000.0
+function logprior_offset(param)
+  -log(2*Cmax)
+end
+
+const sigma_j_min = 0.0
+const sigma_j_max = 99.0
+const sigma_j_0 = 1.0
+function logprior_jitter(sigma_j::Real)
+  -log1p(sigma_j/sigma_j_0)-log(sigma_j_0)-log(log1p(sigma_j_max/sigma_j_0))
+end
+
+const Pmin = 1.0
+const Pmax = 1.0e4
+function logprior_period(P::Real)
+   -log(P)-log(log(Pmax/Pmin))
+end
+function logprior_periods(P::Vector{T}) where T<:Real
+   if length(P) == 0  return 0 end
+   -sum(log.(P))-length(P)*log(log(Pmax/Pmin))
+end
+
+const Kmin = 0.0
+const Kmax = 999.0
+const K0 = 1.0
+function logprior_amplitude(K::Real)
+  logp = -log1p(K/K0)-log(log1p(Kmax/K0))
+end
+
+=#
+
+function logprior_eccentricty{T,A<:AbstractArray{T,1}}( theta::A )
+  logp = 0
+end
+
+function logprior_kepler{T,A<:AbstractArray{T,1}}( theta::A )
+  const nparam_per_pl = 5
+  const nparam_non_pl = 1
+  num_pl = convert(Int64,floor((length(theta)-nparam_non_pl)//nparam_per_pl))
+  @assert(num_pl>=0)
+  logp = -2*num_pl*log(2pi)
+  for p in 0:(num_pl-1)
+    logp += logprior_period(theta[1+p*nparam_per_pl])
+    logp += logprior_amplitude(theta[2+p*nparam_per_pl])
+    #logp += logprior_eccentricity(view(theta,1+p*nparam_per_pl:(p+1)*nparam_per_pl))
+  end
+  logp  += logprior_offset(theta[num_pl*nparam_per_pl+1])
+  if length(theta) == num_pl*nparam_per_pl+2
+    logp  += logprior_jitter(theta[num_pl*nparam_per_pl+2])
+  end
   return logp
 end
 
-function laplace_approximation_kepler_model{T,PDMatT<:AbstractPDMat}(theta::Array{T,1}, times::Array{Float64}, vels::Array{Float64}, Sigma::PDMatT, loglikelihood::Function )
-    f(x) = -loglikelihood(x, times, vels, Sigma)
+#=
+function kernel_quaesiperiodic(dt::Float64)
+  alpha_sq     = 3.0
+  tau_evolve   = 50.0 
+  lambda_p     = 0.5  
+  tau_rotate   = 20.0 
+  alpha_sq*exp(-0.5*((dt/tau_evolve)^2 + (sin(pi*dt/tau_rotate)/lambda_p)^2) )
+end
+
+function make_Sigma(t::Vector{Float64}, sigma_obs::Vector{Float64}, sigma_j::Float64)
+  PDMat( [ kernel_quaesiperiodic(t[i]-t[j]) + (i==j ? sigma_obs[i]^2 + sigma_j^2 : 0.0) for i in 1:length(t), j in 1:length(t)] )
+end
+
+function make_dSigmadsigmaj(t::Vector{Float64}, sigma_obs::Vector{Float64}, sigma_j::Float64)
+  ScalMat(length(t),2*sigma_j)
+end
+
+=#
+
+function make_matrix_posdef_dumb(X::Array{T,2}) where T<:Real
+   eps = 1e-9
+   while !isposdef(X)
+      X = X + ScalMat(size(X,1),eps) 
+	  eps *= 10
+   end
+   PDMat(X)
+end
+
+
+function make_matrix_pd_eigval(A::Array{Float64,2}; epsabs::Float64 = 0.0, epsfac::Float64 = 1.0e-6)
+  @assert(size(A,1)==size(A,2))
+  B = copy(A)
+  itt = 1
+  while !isposdef(B)
+	eigvalB,eigvecB = eig(B)
+	neweigval = (epsabs == 0.0) ? epsfac*minimum(eigvalB[eigvalB.>0]) : epsabs
+	eigvalB[eigvalB.<0] = neweigval
+	B = eigvecB *diagm(eigvalB)*eigvecB'
+	#println("# make_matrix_pd_eigval: ",itt,": ",eigvals(B))
+	itt +=1
+	if itt>size(A,1) 
+	  #println("# There's a problem in make_matrix_pd:",eigvals(A),"\n")
+	  error("*** make_matrix_pd_eigval ***\n")
+  	  break 
+	end
+  end
+  return B
+end
+
+function make_matrix_posdef_softabs(hessian::Array{T,2}; alpha::Float64 = 1000.0) where T<:Real
+  lam, Q = eig(-hessian)
+  lam_twig = lam./tanh.(alpha*lam)
+  H_twig_try = full(Hermitian(Q*diagm(lam_twig)*Q'))
+  if isposdef(H_twig_try) 
+     H_twig = PDMat(H_twig_try)
+  else
+     println("# Problem in softabs: ",hessian)
+	 println("# eigvals_orig =", lam)
+	 println("# eigvals_new = ",eigvals(H_twig_try))
+	 println("# diff = ",H_twig_try.-hessian)
+     H_twig = PDMat(H_twig_try)
+  end
+  return H_twig
+end
+make_matrix_posdef = make_matrix_posdef_softabs
+#make_matrix_posdef = make_matrix_pd_eigval
+
+function laplace_approximation_kepler_model{T,PDMatT<:AbstractPDMat}(theta::Array{T,1}, times::Array{Float64}, vels::Array{Float64}, Sigma::PDMatT, loglikelihood::Function, verbose::Integer = 3 )
+    f(x) = - ( loglikelihood(x, times, vels, Sigma)+logprior_kepler(theta) )
 	td = TwiceDifferentiable(f, theta; autodiff = :forward) 
-	optim_opts =  Optim.Options(show_trace=true,f_tol=1e-4)
+	if verbose >= 2
+	   optim_opts =  Optim.Options(show_trace=true,f_tol=1e-4,time_limit=60)
+	else
+	   optim_opts =  Optim.Options(show_trace=false,f_tol=1e-4,time_limit=60)
+	end
     res_opt = optimize(td,theta,optim_opts)
     bestfit = res_opt.minimizer
 	logp_max = -res_opt.minimum
-	println("# best fit: ",logp_max, " : ",bestfit)
-	flush(STDOUT)
-    hess_cfg = ForwardDiff.HessianConfig(f, theta) 
-	hess_result = DiffBase.HessianResult(theta)
-    ForwardDiff.hessian!(hess_result,f,bestfit)
-    println("# hessian = ",DiffBase.hessian(hess_result))
-	flush(STDOUT)
-	logdet_hess = logdet(DiffBase.hessian(hess_result))
-    println("# logdet(hessian) = ",logdet_hess)
-	flush(STDOUT)
-	0.5*(length(theta)*log(2pi)-logdet_hess+logp_max)
+	if verbose >= 1
+	   println("# best fit: ",logp_max/log(10), " : ",bestfit)
+	end
+    const nparam_per_pl = 5
+    const nparam_non_pl = 1
+    num_pl = convert(Int64,floor((length(theta)-nparam_non_pl)//nparam_per_pl))
+    const nparam_no_jitter =  num_pl*nparam_per_pl+nparam_non_pl
+    hess_cfg = ForwardDiff.HessianConfig(f, view(theta,1:nparam_no_jitter)) 
+	hess_result = DiffBase.HessianResult(view(theta,1:nparam_no_jitter))
+    #ForwardDiff.hessian!(hess_result,f,view(bestfit,1:nparam_no_jitter))
+	ForwardDiff.hessian!(hess_result,f,bestfit[1:nparam_no_jitter])
+	 
+	logdet_hess = logdet(make_matrix_posdef(DiffBase.hessian(hess_result)))
+    if verbose >= 3
+ 	  println("# hessian = ",DiffBase.hessian(hess_result))
+	  println("# logdet(hessian) = ",logdet_hess)
+	end
+	logmarginal = 0.5*(length(view(theta,1:nparam_no_jitter))*log(2pi)-logdet_hess)+logp_max
+	return (logmarginal,res_opt)
 end
+
+function laplace_approximation_kepler_model_jitter_separate{T,PDMatT<:AbstractPDMat}(theta::Array{T,1}, times::Array{Float64}, vels::Array{Float64}, Sigma::PDMatT; sigmaj_min::Real = 0.0, sigmaj_max::Real = 10.0, opt_jitter::Bool=true) 
+                                                 # delta_sigmaj_factor::Real = 0.1 )
+    rms = std(calc_model_rv(theta,times).-vels)
+	if opt_jitter 
+    SigmaTmp = Sigma + PDiagMat(rms^2*ones(length(times)))
+	res_opt = laplace_approximation_kepler_model(theta,times,vels,SigmaTmp,loglikelihood_fixed_jitter)[2]
+	theta = res_opt.minimizer
+	function helper(sigmaj)
+     SigmaTmp = Sigma + PDiagMat(sigmaj^2*ones(length(times)))
+	 -(logprior_jitter(sigmaj)+laplace_approximation_kepler_model(theta,times,vels,SigmaTmp,loglikelihood_fixed_jitter)[1])
+	 #-(laplace_approximation_kepler_model(theta,times,vels,SigmaTmp,loglikelihood_fixed_jitter)[1])
+	end   
+	res_opt = optimize(helper,sigmaj_min,sigmaj_max,show_trace=false)
+	sigmaj = res_opt.minimizer
+	println("# Best sigma_j = ",sigmaj)
+	SigmaTmp = Sigma + PDiagMat(sigmaj^2*ones(length(times)))
+	else
+	   sigmaj = theta[end]
+	   SigmaTmp = Sigma
+    end
+	(logp, res_opt) = laplace_approximation_kepler_model(theta,times,vels,SigmaTmp,loglikelihood_fixed_jitter)
+    #logp += logprior_jitter(sigmaj)
+	theta = res_opt.minimizer
+	dSigmadJ = diagm(2*sigmaj*ones(length(times))) 
+	d2logpdJ2 = 0.5*trace((SigmaTmp \ dSigmadJ)^2)
+	# println("# logdetjitter (ana) = ",logdetjitter)
+    #=
+    delta_sigmaj = delta_sigmaj_factor*sigmaj
+	SigmaTmp = Sigma + PDiagMat((sigmaj+delta_sigmaj)^2*ones(length(times)))
+	logp_hi = laplace_approximation_kepler_model(theta,times,vels,SigmaTmp,loglikelihood_fixed_jitter)[1]
+	logp_hi += logprior_jitter(sigmaj+delta_sigmaj)
+	SigmaTmp = Sigma + PDiagMat((sigmaj-delta_sigmaj)^2*ones(length(times)))
+    logp_lo = laplace_approximation_kepler_model(theta,times,vels,SigmaTmp,loglikelihood_fixed_jitter)[1]
+    logp_lo += logprior_jitter(sigmaj-delta_sigmaj)
+	d2logpdJ2 = (logp_hi-2*logp+logp_lo)/delta_sigmaj^2
+	println("# logp = ",logp)
+	println("# logp_hi = ",logp_hi)
+	println("# logp_lo = ",logp_lo)
+    println("# d^2 logp/dsigmaj^2 = ",d2logpdJ2/log(10))
+	println("# logdetjitter (num) = ",log(abs(d2logpdJ2)))
+	=#
+    log_int_over_sigma = logp + 0.5*(log(2pi)-log(abs(d2logpdJ2)))
+	(log_int_over_sigma,res_opt)
+end
+
+function laplace_approximation_kepler_model_jitter_separate_gauss{T,PDMatT<:AbstractPDMat}(theta::Array{T,1}, times::Array{Float64}, vels::Array{Float64}, Sigma0::PDMatT, num_Sigmas::Integer = 30; Sigma_cache = make_Sigma_cache(num_Sigmas,Sigma0) ) 
+    
+	(sigmaj_list, weights, SigmaList) = Sigma_cache
+	 X = ones(length(times),1)
+     const nparam = size(X,2)
+    
+	   marginalized_likelihood_fix_periods_sigmaj = map(k->laplace_approximation_kepler_model(theta,times, vels, SigmaList[k],loglikelihood_fixed_jitter)[1],1:length(sigmaj_list))
+	   
+       int_norm = maximum(marginalized_likelihood_fix_periods_sigmaj);
+       logp = log(dot( weights, exp.(marginalized_likelihood_fix_periods_sigmaj-int_norm) ))+int_norm
+
+	#(log_int_over_sigma,res_opt)
+end
+
+
 
 #=
 param = [12.0,15.0,0.1,0.1,pi/4,  30.0,10.0,-0.1,-0.1,pi*3/4,  0.0, 1.0]
