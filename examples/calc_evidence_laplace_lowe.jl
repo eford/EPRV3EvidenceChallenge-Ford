@@ -214,7 +214,7 @@ function calc_chisq(data::Vector{T}, model::Array{T,2}, Sigma::SigmaT; FIM::PDMa
   chisq = invquad(Sigma,delta) # sum(delta'*Sigma^-1*delta)
 end
 
-function compute_Laplace_Approx_param_and_integral(data::Vector{T}, model::Array{T,2}, Sigma::SigmaT; FIM::PDMat{T} = make_fischer_information_matrix(model,Sigma), calclogprior::Function = x->(0.0,0.0) ) where {T<:Real, SigmaT<:AbstractPDMat{T} }
+function compute_Laplace_Approx_param_and_integral(data::Vector{T}, model::Array{T,2}, Sigma::SigmaT; FIM::PDMat{T} = make_fischer_information_matrix(model,Sigma), calclogprior::Function = x->(0.0,0.0), report_log_MAP::Bool = false ) where {T<:Real, SigmaT<:AbstractPDMat{T} }
   @assert length(data) == size(model,1) == size(Sigma,1)
   nobs = length(data)
   nparam = size(model,2)
@@ -227,13 +227,14 @@ function compute_Laplace_Approx_param_and_integral(data::Vector{T}, model::Array
   loglikelihood_mode = 0.5*(-chisq-logdet(Sigma)-nobs*log(2pi))
   (logprior_mode, log_jacobian) = calclogprior(param_bf_linalg) 
   log_mode = logprior_mode + loglikelihood_mode
-
+  
   sigma_param = inv(FIM).chol[:U]
+  if report_log_MAP     return (param_bf_linalg, sigma_param,log_mode)  end
   LaplaceApprox = 0.5*nparam*log(2pi)-0.5*logdet(FIM)+log_mode + log_jacobian
   return (param_bf_linalg,sigma_param,LaplaceApprox)
 end
 
-function compute_Laplace_Approx(data::Vector{T}, model::Array{T,2}, Sigma::SigmaT; FIM::PDMat{T} = make_fischer_information_matrix(model,Sigma), calclogprior::Function = x->(0.0,0.0) ) where {T<:Real, SigmaT<:AbstractPDMat{T} }
+function compute_max_aposterior_Approx(data::Vector{T}, model::Array{T,2}, Sigma::SigmaT; calclogprior::Function = x->(0.0,0.0) ) where {T<:Real, SigmaT<:AbstractPDMat{T} }
   @assert length(data) == size(model,1) == size(Sigma,1)
   nobs = length(data)
   nparam = size(model,2)
@@ -246,6 +247,26 @@ function compute_Laplace_Approx(data::Vector{T}, model::Array{T,2}, Sigma::Sigma
   loglikelihood_mode = 0.5*(-chisq-logdet(Sigma)-nobs*log(2pi))
   (logprior_mode, log_jacobian) = calclogprior(param_bf_linalg) 
   log_mode = logprior_mode + loglikelihood_mode
+  return (log_mode, logprior_mode, loglikelihood_mode, log_jacobian)
+end
+
+function compute_Laplace_Approx(data::Vector{T}, model::Array{T,2}, Sigma::SigmaT; FIM::PDMat{T} = make_fischer_information_matrix(model,Sigma), calclogprior::Function = x->(0.0,0.0), report_log_MAP::Bool = false ) where {T<:Real, SigmaT<:AbstractPDMat{T} }
+  @assert length(data) == size(model,1) == size(Sigma,1)
+  nparam = size(model,2)
+  nobs = length(data)
+#=
+  param_bf_linalg = calc_best_fit(data,model,Sigma)
+  predict = model*param_bf_linalg
+  delta = data.-predict
+  chisq = invquad(Sigma,delta) # sum(delta'*Sigma^-1*delta)
+
+  loglikelihood_mode = 0.5*(-chisq-logdet(Sigma)-nobs*log(2pi))
+  (logprior_mode, log_jacobian) = calclogprior(param_bf_linalg) 
+  log_mode = logprior_mode + loglikelihood_mode
+=# 
+  (log_mode, logprior_mode, loglikelihood_mode, log_jacobian) = compute_max_aposterior_Approx(data,model,Sigma,calclogprior=calclogprior)
+  if report_log_MAP return log_mode  end
+
   LaplaceApprox = 0.5*nparam*log(2pi)-0.5*logdet(FIM)+log_mode + log_jacobian
   return LaplaceApprox
 end
@@ -267,18 +288,25 @@ end
 function generate_Ke_samples(bf::Vector, sigma, nsamples::Integer = 1)
   nparam = length(bf)
   const namp_per_pl = 4
-  theta = bf .+ sigma*randn(nparam,nsamples)
+  #theta = bf .+ sigma*randn(nparam,nsamples)
   npl = convert(Int64,floor((nparam-1)//namp_per_pl))
 
   Ks = zeros(nsamples,npl)
   es = zeros(nsamples,npl)
   hs = zeros(nsamples,npl)
   ks = zeros(nsamples,npl)
-  for i in 1:npl
-    Ks[:,i] = sqrt.(theta[1+namp_per_pl*(i-1),:].^2+theta[2+namp_per_pl*(i-1),:].^2)
-	hs[:,i] = theta[3+namp_per_pl*(i-1),:] ./ Ks[:,i]
-	ks[:,i] = theta[4+namp_per_pl*(i-1),:] ./ Ks[:,i]
-	es[:,i] = sqrt.(hs[:,i].^2.+ks[:,i].^2)
+  j = 1
+  while j<=nsamples
+    theta = bf .+ sigma*randn(nparam)
+	for i in 1:npl
+       Ks[j,i] = sqrt.(theta[1+namp_per_pl*(i-1)].^2+theta[2+namp_per_pl*(i-1)].^2)
+	   hs[j,i] = theta[3+namp_per_pl*(i-1)] ./ Ks[j,i]
+	   ks[j,i] = theta[4+namp_per_pl*(i-1)] ./ Ks[j,i]
+	   es[j,i] = sqrt.(hs[j,i].^2.+ks[j,i].^2)
+	end
+	if all(es[j,:].<1.0)
+	     j +=1 
+	end
   end
   return (Ks,es,hs,ks)
 end
@@ -326,14 +354,28 @@ function calc_opt_sigmaj(times::Vector{T}, vels::Vector{T}, sigma_obs::Vector{T}
   result = optimize(calc_laplace_approx_arg_jitter,sigma_j_min,sigma_j_max,rel_tol=1e-6)
 end
 
+function calc_map_no_planet(times::Vector{T}, vels::Vector{T}, sigma_obs::Vector{T}) where T<:Real
+  function calc_map_fixed_jitter(sigmaj::Real) 
+    Sigma = Sigma0 + ScalMat(length(times),sigmaj) 
+    evid = compute_Laplace_Approx(vels,model,Sigma,report_log_MAP=true)
+	evid += logprior_jitter(sigmaj)
+    -evid
+  end
+  model = ones(length(times),1)
+  Sigma0 = PDMat(make_Sigma(times,sigma_obs,0.))
+  result = optimize(calc_map_fixed_jitter,sigma_j_min,sigma_j_max,rel_tol=1e-6)
+  return -result.minimum
+end
+
+
 # Integrate over period
-function compute_marginalized_likelihood_fix_periods(times::Vector{T}, vels::Vector{T}, sigma_obs::Vector{T}, periods::Vector{T}; calclogprior_linear::Function = logprior_sinusoids, make_design_matrix::Function = make_design_matrix_circ, X = make_design_matrix(times,periods), Sigma0 = PDMat(make_Sigma(times,sigma_obs,0.0)) ) where T<:Real
+function compute_marginalized_likelihood_fix_periods(times::Vector{T}, vels::Vector{T}, sigma_obs::Vector{T}, periods::Vector{T}; calclogprior_linear::Function = logprior_sinusoids, make_design_matrix::Function = make_design_matrix_circ, X = make_design_matrix(times,periods), Sigma0 = PDMat(make_Sigma(times,sigma_obs,0.0)), report_log_MAP::Bool=false ) where T<:Real
    const nparam = size(X,2)
 
    function optimize_jitter_helper(sigmaj::Real) 
      Sigma = Sigma0 + ScalMat(length(times),sigmaj) # PDMat(make_Sigma(times,sigma_obs,sigmaj))
 	 FIM = make_fischer_information_matrix(X,Sigma)
-     evid = compute_Laplace_Approx(vels,X,Sigma,FIM=FIM,calclogprior=calclogprior_linear)
+     evid = compute_Laplace_Approx(vels,X,Sigma,FIM=FIM,calclogprior=calclogprior_linear,report_log_MAP=report_log_MAP)
  	 evid += logprior_jitter(sigmaj)
 	 -evid
    end
@@ -344,9 +386,11 @@ function compute_marginalized_likelihood_fix_periods(times::Vector{T}, vels::Vec
    Sigma = Sigma0 + ScalMat(length(times),sigmaj) # PDMat(make_Sigma(times,sigma_obs,sigmaj))
    dSdj = make_dSigmadsigmaj(times,sigma_obs,sigmaj)
    FIM = make_fischer_information_matrix(X,Sigma)
-   logp = compute_Laplace_Approx(vels,X,Sigma,FIM=FIM,calclogprior=calclogprior_linear)
+   logp = compute_Laplace_Approx(vels,X,Sigma,FIM=FIM,calclogprior=calclogprior_linear,report_log_MAP=report_log_MAP)
    logp += logprior_jitter(sigmaj)+ logprior_periods(periods)
-   logp += 0.5*(log(2pi)-log(0.5*trace((Sigma \ full(dSdj))^2)))
+   if !report_log_MAP
+      logp += 0.5*(log(2pi)-log(0.5*trace((Sigma \ full(dSdj))^2)))
+   end 
    #println("# logp = ",logp)
    return logp 
 end
@@ -607,7 +651,7 @@ end
   
 
 # Optimize periods
-function compute_marginalized_likelihood_near_periods_laplace(times::Vector{T}, vels::Vector{T}, sigma_obs::Vector{T}, periods::Vector{T}; calclogprior_linear::Function = logprior_sinusoids, make_design_matrix::Function = make_design_matrix_circ ) where T<:Real
+function compute_marginalized_likelihood_near_periods_laplace(times::Vector{T}, vels::Vector{T}, sigma_obs::Vector{T}, periods::Vector{T}; calclogprior_linear::Function = logprior_sinusoids, make_design_matrix::Function = make_design_matrix_circ, report_log_MAP::Bool=false ) where T<:Real
    X = make_design_matrix(times,periods)
 
    function optimize_jitter_helper(sigmaj::Real) 
@@ -616,7 +660,7 @@ function compute_marginalized_likelihood_near_periods_laplace(times::Vector{T}, 
 	 #println("# making FIM")
      FIM = PDMat(Xt_invA_X(Sigma,X))
      #println("# approximating integral")
-	 evid = compute_Laplace_Approx(vels,X,Sigma,FIM=FIM,calclogprior=calclogprior_linear)
+	 evid = compute_Laplace_Approx(vels,X,Sigma,FIM=FIM,calclogprior=calclogprior_linear,report_log_MAP=report_log_MAP)
  	 evid += logprior_jitter(sigmaj)
 	 #println("# ",evid/log(10))
      -evid
@@ -630,14 +674,14 @@ function compute_marginalized_likelihood_near_periods_laplace(times::Vector{T}, 
    function optimize_period_helper(P::T) 
      X = make_design_matrix(times,[P])
      FIM = PDMat(Xt_invA_X(Sigma,X))
-     evid = compute_Laplace_Approx(vels,X,Sigma,FIM=FIM,calclogprior=calclogprior_linear)
+     evid = compute_Laplace_Approx(vels,X,Sigma,FIM=FIM,calclogprior=calclogprior_linear,report_log_MAP=report_log_MAP)
  	 evid += logprior_jitter(sigmaj)
      -evid
    end
    function optimize_period_helper(periods::Vector{T}) 
      X = make_design_matrix(times,periods)
      FIM = PDMat(Xt_invA_X(Sigma,X))
-     evid = compute_Laplace_Approx(vels,X,Sigma,FIM=FIM,calclogprior=calclogprior_linear)
+     evid = compute_Laplace_Approx(vels,X,Sigma,FIM=FIM,calclogprior=calclogprior_linear,report_log_MAP=report_log_MAP)
  	 evid += logprior_jitter(sigmaj)
      -evid
    end
@@ -653,18 +697,21 @@ function compute_marginalized_likelihood_near_periods_laplace(times::Vector{T}, 
    best_period = copy(periods)
    X = make_design_matrix(times,periods)
    FIM = PDMat(Xt_invA_X(Sigma,X))
-   (param_bf,sigma_param,logp) = compute_Laplace_Approx_param_and_integral(vels,X,Sigma,FIM=FIM,calclogprior=calclogprior_linear)
+   (param_bf,sigma_param,logp) = compute_Laplace_Approx_param_and_integral(vels,X,Sigma,FIM=FIM,calclogprior=calclogprior_linear,report_log_MAP=report_log_MAP)
    logp += logprior_jitter(sigmaj)+ logprior_periods(periods)
 
    #println("# marginal at best sigma_j & P: ",logp/log(10))
    
-   # Laplace approx to integrate over jitter parameter
-   dSdj = make_dSigmadsigmaj(times,sigma_obs,sigmaj)
-   log_int_over_sigma_j = 0.5*(log(2pi)-log(0.5*trace((Sigma \ full(dSdj))^2)))
-   logp += log_int_over_sigma_j
-
-   #println("# marginal over sigma_j at best P: ",logp/log(10))
-
+   if !report_log_MAP
+      # Laplace approx to integrate over jitter parameter
+      dSdj = make_dSigmadsigmaj(times,sigma_obs,sigmaj)
+      log_int_over_sigma_j = 0.5*(log(2pi)-log(0.5*trace((Sigma \ full(dSdj))^2)))
+      logp += log_int_over_sigma_j
+      #println("# marginal over sigma_j at best P: ",logp/log(10))
+   else
+      log_int_over_sigma_j = 0.
+   end
+   
    # Laplace approx to integrate over period 
    sigma_P = zeros(length(periods))
    log_int_over_periods = 0
@@ -691,6 +738,11 @@ function compute_marginalized_likelihood_near_periods_laplace(times::Vector{T}, 
      #println("# d^2 logp/dP_",i,"^2 = ",d2logpdp2/log(10))
      log_int_over_periods += 0.5*(log(2pi)-log(abs(d2logpdp2)))
    end
+
+   if report_log_MAP
+      return (param_bf,sigma_param,logp,best_period,sigma_P)
+   end
+   
    logp += log_int_over_periods # Approx as diagonal
    println("# marginal over P at ",best_period," and sigma_j at ",sigmaj," (laplace): ",logp/log(10))
    if calclogprior_linear == logprior_epicycles
@@ -788,10 +840,6 @@ function find_n_peaks_in_pgram(period::Vector{Float64}, power::Vector{Float64}; 
   @assert num_peaks>= 1
   peak_periods = zeros(num_peaks)
   peak_logps = zeros(num_peaks)
-  peaks_found = 1
-  idx_peak = findmax(power)[2]
-  peak_periods[peaks_found] = period[idx_peak]
-  peak_logps[peaks_found] = power[idx_peak]
   idx_active = trues(length(period))
   for i in 1:length(exclude_peaks)
      for j in 1:length(period)
@@ -800,66 +848,96 @@ function find_n_peaks_in_pgram(period::Vector{Float64}, power::Vector{Float64}; 
         end # if near an excluded peak
      end # for over periods
   end # for over excluded peaks
+  peaks_found = 1
+  idx_peak = findmax(power[idx_active])[2]
+  peak_periods[peaks_found] = period[idx_active][idx_peak]
+  peak_logps[peaks_found] = power[idx_active][idx_peak]
   while peaks_found < num_peaks
-     peaks_found += 1
-	 idx_peak = findmax(power[idx_active])[2]
-     peak_periods[peaks_found] = period[idx_active][idx_peak]
-	 peak_logps[peaks_found] = power[idx_active][idx_peak]
-
      for j in 1:length(period)
         if peak_periods[peaks_found]/exclude_period_factor <= period[j] <= peak_periods[peaks_found]*exclude_period_factor
            idx_active[j] = false
         end # blackout periods near most recent peak
      end # for over periods
 
+     peaks_found += 1
+	 idx_peak = findmax(power[idx_active])[2]
+     peak_periods[peaks_found] = period[idx_active][idx_peak]
+	 peak_logps[peaks_found] = power[idx_active][idx_peak]
+	 
 	 end # while more peaks to be found
   (peak_periods,peak_logps)
 end
 
 
 
-function compute_evidences_laplace_circ{T}(times::Vector{T}, vels::Vector{T}, sigma_obs::Vector{T}; num_Sigmas::Integer = 20, samples_per_peak::Integer = 1, Pminsearch::Vector{Float64} = 10.0*ones(3) )
+function compute_evidences_laplace_circ{T}(times::Vector{T}, vels::Vector{T}, sigma_obs::Vector{T}; num_Sigmas::Integer = 20, samples_per_peak::Integer = 1, Pminsearch::Vector{Float64} = 10.0*ones(3), report_log_MAP::Bool=false, max_num_pl::Integer=3 )
 	 #(sigmaj_list,weights,SigmaList) = make_Sigma_cache(num_Sigmas,Sigma0)
 
-runtimes = zeros(4)
+runtimes = zeros(max_num_pl+1)
 tic()	
-log10_evidences = zeros(4)
-res0l = compute_marginalized_likelihood_fix_periods(times,vels,sigma_obs,Float64[])
+log10_evidences = zeros(max_num_pl+1)
+res0l = compute_marginalized_likelihood_fix_periods(times,vels,sigma_obs,Float64[],report_log_MAP=report_log_MAP)
 res0g = compute_marginalized_likelihood_const_sigmalist(times,vels,sigma_obs,num_Sigmas=num_Sigmas)
 println("# Evidence for npl=0: ",res0l/log(10),", ", res0g/log(10))
-#log10_evidences[1] = res0l/log(10)
-log10_evidences[1] = res0g/log(10)
+if report_log_MAP
+  log10_evidences[1] = res0l/log(10)
+else
+  log10_evidences[1] = res0g/log(10)
+end
 runtimes[1] = toq()
-tic()
+if max_num_pl<=0
+  return (log10_evidences,[],[res0l],runtimes)
+end
 
+tic()
 @time res1b = brute_force_over_periods_1d(times,vels,sigma_obs,Pminsearch[1],Pmax,samples_per_peak=samples_per_peak,num_Sigmas=num_Sigmas)
 P1 = find_n_peaks_in_pgram(res1b[1],res1b[2])[1][1]
 
-res1l = compute_marginalized_likelihood_near_periods_laplace(times,vels,sigma_obs, [P1] )
+res1l = compute_marginalized_likelihood_near_periods_laplace(times,vels,sigma_obs, [P1],report_log_MAP=report_log_MAP )
 res1g = compute_marginalized_likelihood_near_periods_gauss(times,vels,sigma_obs, [P1],num_Sigmas=num_Sigmas )
-#log10_evidences[2] = res1l[3] > res1b[3] ? res1l[3]/log(10) : res1b[3]/log(10)
-log10_evidences[2] = res1g[3] > res1b[3] ? res1g[3]/log(10) : res1b[3]/log(10)
+if report_log_MAP
+   log10_evidences[2] = res1l[3]/log(10)
+else
+   log10_evidences[2] = res1g[3] > res1b[3] ? res1g[3]/log(10) : res1b[3]/log(10)
+end
 P1 = res1l[4][1]
 runtimes[2] = toq()
+
+if max_num_pl<=1
+  return (log10_evidences,[P1],[res1l],runtimes)
+end
+
 tic()
 @time res2b = brute_force_over_periods_multiplanet_1d(times,vels,sigma_obs,[P1],Pminsearch[2],Pmax,samples_per_peak=samples_per_peak,num_Sigmas=num_Sigmas)
+println("# About to search for second planet, excluding peak near P=",P1)
 P2 = find_n_peaks_in_pgram(res2b[1],res2b[2],exclude_peaks=[P1])[1][1]
 
-res2l = compute_marginalized_likelihood_near_periods_laplace(times,vels,sigma_obs, [P1,P2] )
+res2l = compute_marginalized_likelihood_near_periods_laplace(times,vels,sigma_obs, [P1,P2],report_log_MAP=report_log_MAP )
 res2g = compute_marginalized_likelihood_near_periods_gauss(times,vels,sigma_obs, [P1,P2],num_Sigmas=num_Sigmas  )
-#log10_evidences[3] = res2l[3] > res2b[3] ? res2l[3]/log(10) : res2b[3]/log(10)
-log10_evidences[3] = res2g[3] > res2b[3] ? res2g[3]/log(10) : res2b[3]/log(10)
+if report_log_MAP
+   log10_evidences[3] = res2l[3]/log(10)
+else
+   log10_evidences[3] = res2g[3] > res2b[3] ? res2g[3]/log(10) : res2b[3]/log(10)
+end
 P1 = res2l[4][1]
 P2 = res2l[4][2]
 runtimes[3] = toq()
+  
+if max_num_pl<=2
+  return (log10_evidences,[P1,P2],[res1l,res2l],runtimes)
+end
+
 tic()
 @time res3b = brute_force_over_periods_multiplanet_1d(times,vels,sigma_obs,[P1,P2],Pminsearch[3],Pmax,samples_per_peak=samples_per_peak,num_Sigmas=num_Sigmas)
 P3 = find_n_peaks_in_pgram(res3b[1],res3b[2],num_peaks=10,exclude_peaks=[P1,P2])[1][1]
 
-res3l = compute_marginalized_likelihood_near_periods_laplace(times,vels,sigma_obs, [P1,P2,P3] )
+res3l = compute_marginalized_likelihood_near_periods_laplace(times,vels,sigma_obs, [P1,P2,P3],report_log_MAP=report_log_MAP )
 res3g = compute_marginalized_likelihood_near_periods_gauss(times,vels,sigma_obs, [P1,P2,P3],num_Sigmas=num_Sigmas  )
-#log10_evidences[4] = res3l[3] > res3b[3] ? res3l[3]/log(10) : res3b[3]/log(10)
-log10_evidences[4] = res3g[3] > res3b[3] ? res3g[3]/log(10) : res3b[3]/log(10)
+if report_log_MAP
+   log10_evidences[4] = res3l[3]/log(10) 
+else
+   log10_evidences[4] = res3g[3] > res3b[3] ? res3g[3]/log(10) : res3b[3]/log(10)
+end
 runtimes[4] = toq()
 
   return (log10_evidences,[P1,P2,P3],[res1l,res2l,res3l],runtimes)
@@ -888,8 +966,8 @@ function make_kepler_param_from_linear_output(output, npl::Integer)
 	  w = atan2(h,k)
       param[1+(i-1)*nparam_per_pl] = P
 	  param[2+(i-1)*nparam_per_pl] = K > 0 ? K : 0.5
-	  param[3+(i-1)*nparam_per_pl] = h/100
-	  param[4+(i-1)*nparam_per_pl] = k/100
+	  param[3+(i-1)*nparam_per_pl] = 1e-8 # h/100
+	  param[4+(i-1)*nparam_per_pl] = 1e-4 # k/100
 	  param[5+(i-1)*nparam_per_pl] = mod2pi(wpM+2pi*tref/P)	  
   end
   param[1+npl*nparam_per_pl] = param_linear[1+npl*nparam_linear_per_pl]
@@ -935,8 +1013,8 @@ function optimize_phases{T}(param, times::Vector{T}, vels::Vector{T}, Sigma)
   for plid in 1:npl
      optimize_phase(param,times,vels,Sigma,plid)
 	 println("# param (after phase ",plid," ) = ", param)
-	 optimize_omega(param,times,vels,Sigma,plid)
-	 println("# param = (after omega ",plid," = ", param)
+	 #optimize_omega(param,times,vels,Sigma,plid)
+	 #println("# param = (after omega ",plid," = ", param)
   end
   param
 end
@@ -948,7 +1026,7 @@ function analyze_dataset(filename::String; num_Sigmas::Integer = 20, samples_per
   times = data[:,1];
   vels = data[:,2];
   sigma_obs = data[:,3];
-  nobs = length(vels)
+  nobs = length(vels);
   
    (evidence_circ_list, P_best, result_laplace_circ_list, runtimes_circ) = compute_evidences_laplace_circ(times,vels,sigma_obs,num_Sigmas=num_Sigmas, Pminsearch=Pminsearch)
    runtimes_kepler = zeros(runtimes_circ)
@@ -1034,6 +1112,61 @@ function write_evidences_file(filename::String,output; use_method::Integer = 1)
    writedlm(filename, output_circ_data, ", ")
 end
 
+function make_param_string(paramid::String, npl::Integer, plid::Integer,bf::Real, sigma::Real; runtime::Integer=0)
+	   p50 = bf
+	   p02 = bf-2*sigma
+	   p16 = bf-sigma
+	   p84 = bf+sigma
+	   p98 = bf+2*sigma
+	   string(runtime,',',paramid,',',npl,',',plid,',',bf,',',p50,',',p02,',',p16,',',p84,',',p98)
+end
+	   
+function write_parameters_file(filename::String,output; use_method::Integer = 1, input_filename::String="../data/rvs_0001.txt", num_pl::Integer=3)
+    file = open(filename,"w")
+	evidence = output[1]
+	runtime = convert(Array{Int64,1},ceil.(output[12]))[num_pl]
+    println(file,make_param_string("J",num_pl,0,output[6][num_pl],output[7][num_pl],runtime=runtime))
+	(Ks,es,hs,ks) = generate_Ke_samples(output[4][num_pl],output[5][num_pl],1000)
+	for plid = 1:num_pl
+	   bf = output[2][plid]
+	   sigma = output[3][num_pl][plid]
+	   output_string = make_param_string("P",num_pl,plid,bf,sigma,runtime=runtime)
+	   println(file,output_string)
+	   bf = mean(Ks[:,plid])
+	   sigma = std(Ks[:,plid])
+	   output_string = make_param_string("K",num_pl,plid,bf,sigma,runtime=runtime)
+	   println(file,output_string)
+	 end
+	close(file)
+end
+
+#=
+for num_pl in 1:3
+   write_parameters_file(string("params_",num_pl,"_000",1,".txt"),output1,input_filename="../data/rvs_0001.txt",num_pl=num_pl)
+   write_parameters_file(string("params_",num_pl,"_000",2,".txt"),output2,input_filename="../data/rvs_0002.txt",num_pl=num_pl)
+   write_parameters_file(string("params_",num_pl,"_000",3,".txt"),output3,input_filename="../data/rvs_0003.txt",num_pl=num_pl)
+   write_parameters_file(string("params_",num_pl,"_000",4,".txt"),output4,input_filename="../data/rvs_0004.txt",num_pl=num_pl)
+   write_parameters_file(string("params_",num_pl,"_000",5,".txt"),output5,input_filename="../data/rvs_0005.txt",num_pl=num_pl)
+   write_parameters_file(string("params_",num_pl,"_000",6,".txt"),output6,input_filename="../data/rvs_0006.txt",num_pl=num_pl)
+end
+=#
+
+function analyze_dataset(filename::String; num_Sigmas::Integer = 20, samples_per_peak::Real = 1.0, Pminsearch::Vector{Float64} = 10.0*ones(3))
+  # Read dataset
+  data = readdlm(filename);
+  times = data[:,1];
+  vels = data[:,2];
+  sigma_obs = data[:,3];
+  nobs = length(vels);
+  
+   (evidence_circ_list, P_best, result_laplace_circ_list, runtimes_circ) = compute_evidences_laplace_circ(times,vels,sigma_obs,num_Sigmas=num_Sigmas, Pminsearch=Pminsearch)
+    write_parameters_file("tmp1.out",ans, input_filename=filename, num_pl=1)
+	write_parameters_file("tmp2.out",ans, input_filename=filename, num_pl=2)
+	write_parameters_file("tmp3.out",ans, input_filename=filename, num_pl=3)
+end
+
+   
+
 function write_evidences_file(filename::String,output; use_method::Integer = 1, input_filename::String="../data/rvs_0001.txt")
    if use_method==1
       evidence = output[1]
@@ -1057,6 +1190,81 @@ function write_evidences_file(filename::String,output; use_method::Integer = 1, 
 		  optimize_phases(param,times,vels,SigmaBig)
 	      param2 = laplace_approximation_kepler_model_jitter_separate(param,times,vels,Sigma0,opt_jitter=false)[2].minimizer
 		  evidence[1+np] = laplace_approximation_kepler_model_jitter_separate(param2,times,vels,Sigma0,opt_jitter=true)[1]/log(10) 
+		  runtime[1+np] = toc()
+	   end
+   elseif use_method==4
+       evidence = zeros(4)
+	   runtime = zeros(4)
+	   data = readdlm(input_filename)
+       times = data[:,1];
+       vels = data[:,2];
+       sigma_obs = data[:,3];
+	   Sigma0 = PDMat(make_Sigma(times,sigma_obs,0.0));
+	   evidence[1] = NaN
+       for np in 0:3
+	      tic()
+		  periods = output[2][1:np]
+		  if np == 1 
+		     param = vcat(output[4][np][[1,2,5]],output[6])
+		  elseif np == 2
+		     idx = vcat(output[4][np][[1,2,5,6,9]],output[6])
+		  elseif np == 3
+		     idx = vcat(output[4][np][[1,2,5,6,9,10,13]],output[6])
+		  end		
+          if np == 0    
+ 		     evidence[1+np] = calc_map_no_planet(times,vels,sigma_obs)/log(10)
+		  else
+             evidence[1+np] = compute_marginalized_likelihood_near_periods_laplace(times, vels, sigma_obs, periods,  calclogprior_linear=logprior_sinusoids, make_design_matrix=make_design_matrix_circ, report_log_MAP=true)[3]/log(10) # Actually logMAP
+		  end  
+		  runtime[1+np] = toc()
+	   end
+   elseif use_method==5
+       evidence = zeros(4)
+	   runtime = zeros(4)
+	   data = readdlm(input_filename)
+       times = data[:,1];
+       vels = data[:,2];
+       sigma_obs = data[:,3];
+	   Sigma0 = PDMat(make_Sigma(times,sigma_obs,0.0));
+	   evidence[1] = NaN
+       for np in 0:3
+	      tic()
+		  periods = output[2][1:np]
+		  if np == 1 
+		     param = vcat(output[4][np][[1,2,5]],output[6])
+		  elseif np == 2
+		     idx = vcat(output[4][np][[1,2,5,6,9]],output[6])
+		  elseif np == 3
+		     idx = vcat(output[4][np][[1,2,5,6,9,10,13]],output[6])
+		  end			 
+          if np == 0    
+ 		     evidence[1+np] = calc_map_no_planet(times,vels,sigma_obs)/log(10)
+		  else
+             evidence[1+np] = compute_marginalized_likelihood_near_periods_laplace(times, vels, sigma_obs, periods,  calclogprior_linear=logprior_epicycles, make_design_matrix=make_design_matrix_epicycle, report_log_MAP=true)[3]/log(10) # Actually logMAP
+	      end 	   
+		  runtime[1+np] = toc()
+	   end
+   elseif use_method==6
+       evidence = zeros(4)
+	   runtime = zeros(4)
+	   data = readdlm(input_filename)
+       times = data[:,1];
+       vels = data[:,2];
+       sigma_obs = data[:,3];
+	   Sigma0 = PDMat(make_Sigma(times,sigma_obs,0.0));
+	   evidence[1] = NaN
+       for np in 0:3
+	      tic()
+		  if np == 0    
+ 		     evidence[1+np] = calc_map_no_planet(times,vels,sigma_obs)/log(10)
+		  else
+		  param = make_kepler_param_from_linear_output(output,np)
+	      SigmaBig = PDMat(make_Sigma(times,sigma_obs,param[end]));
+		  optimize_phases(param,times,vels,SigmaBig)
+	      #param2 = laplace_approximation_kepler_model_jitter_separate(param,times,vels,Sigma0,opt_jitter=false,report_log_MAP=true)[2].minimizer
+		  #evidence[1+np] = laplace_approximation_kepler_model_jitter_separate(param2,times,vels,Sigma0,opt_jitter=true,report_log_MAP=true)[1]/log(10) 
+		  evidence[1+np] = laplace_approximation_kepler_model_jitter_separate(param,times,vels,Sigma0,opt_jitter=false,report_log_MAP=true)[1]/log(10) 
+		  end
 		  runtime[1+np] = toc()
 	   end
    end
@@ -1197,10 +1405,188 @@ end
   
 
 #=  
+include("calc_evidence_laplace_lowe.jl")
+using JLD
+@load "output_kepler_40_4_10.jld"
+@load "output_case_4.jld"
+
+write_evidences_file("map_linearized_circ/evidences_0001.txt",output1,use_method=4,input_filename="../data/rvs_0001.txt")
+write_evidences_file("map_linearized_circ/evidences_0002.txt",output2,use_method=4,input_filename="../data/rvs_0002.txt")
+write_evidences_file("map_linearized_circ/evidences_0003.txt",output3,use_method=4,input_filename="../data/rvs_0003.txt")
+write_evidences_file("map_linearized_circ/evidences_0004.txt",output4,use_method=4,input_filename="../data/rvs_0004.txt")
+write_evidences_file("map_linearized_circ/evidences_0005.txt",output5,use_method=4,input_filename="../data/rvs_0005.txt")
+write_evidences_file("map_linearized_circ/evidences_0006.txt",output6,use_method=4,input_filename="../data/rvs_0006.txt")
+@save "output_method4.jld"
+
+write_evidences_file("map_linearized_ecc/evidences_0001.txt",output1,use_method=5,input_filename="../data/rvs_0001.txt")
+write_evidences_file("map_linearized_ecc/evidences_0002.txt",output2,use_method=5,input_filename="../data/rvs_0002.txt")
+write_evidences_file("map_linearized_ecc/evidences_0003.txt",output3,use_method=5,input_filename="../data/rvs_0003.txt")
+write_evidences_file("map_linearized_ecc/evidences_0004.txt",output4,use_method=5,input_filename="../data/rvs_0004.txt")
+write_evidences_file("map_linearized_ecc/evidences_0005.txt",output5,use_method=5,input_filename="../data/rvs_0005.txt")
+write_evidences_file("map_linearized_ecc/evidences_0006.txt",output6,use_method=5,input_filename="../data/rvs_0006.txt")
+@save "output_method5.jld"
+
+write_evidences_file("map_keplerian/evidences_0001.txt",output1,use_method=6,input_filename="../data/rvs_0001.txt")
+write_evidences_file("map_keplerian/evidences_0002.txt",output2,use_method=6,input_filename="../data/rvs_0002.txt")
+write_evidences_file("map_keplerian/evidences_0003.txt",output3,use_method=6,input_filename="../data/rvs_0003.txt")
+write_evidences_file("map_keplerian/evidences_0004.txt",output4,use_method=6,input_filename="../data/rvs_0004.txt")
+write_evidences_file("map_keplerian/evidences_0005.txt",output5,use_method=6,input_filename="../data/rvs_0005.txt")
+write_evidences_file("map_keplerian/evidences_0006.txt",output6,use_method=6,input_filename="../data/rvs_0006.txt")
+@save "output_method6.jld"
+
 write_evidences_file("laplace_keplerian/evidences_0001.txt",output1,use_method=3,input_filename="../data/rvs_0001.txt")
-write_evidences_file("laplace_keplerian/evidences_0002.txt",output1,use_method=3,input_filename="../data/rvs_0002.txt")
-write_evidences_file("laplace_keplerian/evidences_0003.txt",output1,use_method=3,input_filename="../data/rvs_0003.txt")
-write_evidences_file("laplace_keplerian/evidences_0004.txt",output1,use_method=3,input_filename="../data/rvs_0004.txt")
-write_evidences_file("laplace_keplerian/evidences_0005.txt",output1,use_method=3,input_filename="../data/rvs_0005.txt")
-write_evidences_file("laplace_keplerian/evidences_0006.txt",output1,use_method=3,input_filename="../data/rvs_0006.txt")
+write_evidences_file("laplace_keplerian/evidences_0002.txt",output2,use_method=3,input_filename="../data/rvs_0002.txt")
+write_evidences_file("laplace_keplerian/evidences_0003.txt",output3,use_method=3,input_filename="../data/rvs_0003.txt")
+write_evidences_file("laplace_keplerian/evidences_0004.txt",output4,use_method=3,input_filename="../data/rvs_0004.txt")
+write_evidences_file("laplace_keplerian/evidences_0005.txt",output5,use_method=3,input_filename="../data/rvs_0005.txt")
+write_evidences_file("laplace_keplerian/evidences_0006.txt",output6,use_method=3,input_filename="../data/rvs_0006.txt")
+@save "output_method3.jld"
+
 =#
+
+function direct_integration(data::Vector{T}, model::Array{T,2}, Sigma::SigmaT; FIM::PDMat{T} = make_fischer_information_matrix(model,Sigma), calclogprior::Function = x->(0.0,0.0), report_log_MAP::Bool = false ) where {T<:Real, SigmaT<:AbstractPDMat{T} }
+  @assert length(data) == size(model,1) == size(Sigma,1)
+  nobs = length(data)
+  nparam = size(model,2)
+
+  param_bf_linalg = calc_best_fit(data,model,Sigma)
+  predict = model*param_bf_linalg
+  delta = data.-predict
+  chisq = invquad(Sigma,delta) # sum(delta'*Sigma^-1*delta)
+
+  loglikelihood_mode = 0.5*(-chisq-logdet(Sigma)-nobs*log(2pi))
+  (logprior_mode, log_jacobian) = calclogprior(param_bf_linalg) 
+  log_mode = logprior_mode + loglikelihood_mode
+  
+  sigma_param = inv(FIM).chol[:U]
+  if report_log_MAP     return (param_bf_linalg, sigma_param,log_mode)  end
+  LaplaceApprox = 0.5*nparam*log(2pi)-0.5*logdet(FIM)+log_mode + log_jacobian
+  return (param_bf_linalg,sigma_param,LaplaceApprox)
+end
+
+
+function compute_marginalized_likelihood_const_gaussgk(times::Vector{T}, vels::Vector{T}, sigma_obs::Vector{T}; Sigma0 = PDMat(make_Sigma(times,sigma_obs,0.0)) ) where T<:Real
+    X = ones(length(times),1)
+    const nparam = size(X,2)
+    function log_integrand(x) 
+        Sigma = Sigma0 + ScalMat(length(times),x) 
+		compute_marginalized_likelihood_fix_periods_sigmaj(times, vels, sigma_obs, Float64[], x, Sigma=Sigma,X=X)+logprior_jitter(x)
+	end
+    int_norm = log_integrand(0.0)
+	function integrand(x)
+	   exp(log_integrand(x)-int_norm)
+	end
+	integral = QuadGK.quadgk(integrand,0.0,2.0,99.0,reltol=1e-14)
+	
+    (log(integral[1]) + int_norm, log(integral[2]/integral[1]) )
+end
+
+
+
+
+function loglikelihood_zero_pl( param::Vector{T}, times::Vector{T}, vels::Vector{T}, sigma_obs::Vector{T}; calclogprior::Function = x->(0.0,0.0) ) where T<:Real
+  @assert length(vels) == length(sigma_obs) # size(Sigma,1)
+  nobs = length(vels)
+
+  predict = ones(nobs)*param[1]
+  delta = vels.-predict
+  Sigma = make_Sigma(times,sigma_obs,param[2])
+  chisq = invquad(Sigma,delta) 
+  loglikelihood_mode = 0.5*(-chisq-logdet(Sigma)-nobs*log(2pi))
+end
+  
+
+function logposterior_zero_pl( param::Vector{T}, times::Vector{T}, vels::Vector{T}, sigma_obs::Vector{T}) where T<:Real
+  logprior_offset(param[1])+logprior_jitter(param[2])+loglikelihood_zero_pl(param,times,vels,sigma_obs)
+end
+
+
+function loglikelihood_zero_pl( param::Vector{T}, data::Vector{T}, Sigma::SigmaT; calclogprior::Function = x->(0.0,0.0) ) where {T<:Real, SigmaT<:AbstractPDMat{T} }
+  @assert length(data) == size(Sigma,1)
+  nobs = length(data)
+
+  predict = ones(nobs)*param[1]
+  delta = data.-predict
+  Sigma = make_Sigma(times,sigma_obs,param[2])
+  chisq = invquad(Sigma,delta) 
+
+  loglikelihood_mode = 0.5*(-chisq-logdet(Sigma)-nobs*log(2pi))
+end
+  
+function logposterior_zero_pl( param::Vector{T}, data::Vector{T}, Sigma::SigmaT ) where {T<:Real, SigmaT<:AbstractPDMat{T} }
+  logprior_offset(param[1])+logprior_jitter(param[2])+loglikelihood_zero_pl(param,data,Sigma)
+end
+
+function cuba_integrand(x::Vector{T}, output::Vector{T}) where T<:Real
+  param_cuba = similar(x)
+  param_cuba[1] = -1000+2000*x[1]
+  param_cuba[2] = 0+99*x[2]
+  output[1] = exp(logposterior_zero_pl(param_cuba,times,vels,sigma_obs)-int_norm)
+  
+end
+
+#=
+int_norm = logposterior_zero_pl([0.0,2.0],times,vels,sigma_obs)
+diovenne(cuba_integrand,2)
+=#
+
+function logposterior_zero_pl_marginalize_offset( sigmaj::T, times::Vector{T}, vels::Vector{T}, sigma_obs::Vector{T}; xmax::T=Cmax, xmin::T=-xmax) where T<:Real
+  #@assert length(vels) == length(times) = length(sigma_obs)
+  param = zeros(2)
+  
+  function log_integrand(x::T)
+    param[1] = x
+    logprior_offset(param[1])+logprior_jitter(param[2])+loglikelihood_zero_pl(param,times,vels,sigma_obs)
+  end
+  
+  param[2] = sigmaj
+  int_norm = log_integrand(0.)
+  function integrand(x::T)
+     exp(log_integrand(x)-int_norm)
+  end
+  
+  log(QuadGK.quadgk(integrand,xmin,xmax)[1])+int_norm
+end
+
+
+#=
+data = readdlm("../data/rvs_0001.txt");
+times = data[:,1];
+vels = data[:,2];
+sigma_obs = data[:,3];
+Sigma0 = make_Sigma(times,sigma_obs,0.0)
+Sigma2 = make_Sigma(times,sigma_obs,2.0)  
+=#
+
+#=
+include("calc_evidence_laplace_lowe.jl")
+zero_pl_tests = 
+	[("rvs_0001.txt", [-0.728509750583953064E+00, 0.208717785347551521E+01]),
+	("rvs_0002.txt", [ 0.653665406348636679E+01, 0.171886843613598783E+01]),
+	("rvs_0003.txt", [-0.869753669161968901E+01, 0.994907921829712771E+00]),
+	("rvs_0004.txt", [-0.658082070168154587E+01, 0.682875011391089748E+00]),
+	("rvs_0005.txt", [-0.486556982931438142E+01, 0.930406316677828249E+00]),
+	("rvs_0006.txt", [-0.108329221460122653E+02, 0.115487852990739137E+01])]
+	
+filename_out = "tmp.out"
+file_out = open(filename_out,"w")
+for test in zero_pl_tests
+  filename = joinpath("..","data",test[1])
+  data = readdlm(filename)
+  times = data[:,1];
+  vels = data[:,2];
+  sigma_obs = data[:,3];
+  lnlikelihood = loglikelihood_zero_pl(test[2],times,vels,sigma_obs)
+  println(file_out,test, ":  ", lnlikelihood)
+  test2 = copy(test[2])
+  test2[1] = 0.0
+  lnlikelihood = loglikelihood_zero_pl(test2,times,vels,sigma_obs)
+  println(file_out,(test[1],test2), ":  ", lnlikelihood)
+end
+close(file_out)
+
+=#
+
+#loglikelihood_zero_pl([-0.639837062706153,0.0],times,vels,sigma_obs)
+
+
